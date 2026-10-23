@@ -275,11 +275,35 @@ with tab2:
 # 3. MATRICE
 # ==========================================================================
 with tab3:
+    # --- Filtre par début de shift (sélection vide = tous les agents) ---
+    _hh = matrice["Debut_prevu"].apply(lambda t: t.strftime("%H:%M") if hasattr(t, "strftime") else None)
+    _cnt = _hh.value_counts().sort_index()
+    _opts = {f"🕐 {h}  ·  {n}": h for h, n in _cnt.items()}
+    _sans = int(_hh.isna().sum())
+    if _sans:
+        _opts[f"— Sans horaire  ·  {_sans}"] = None
+    st.markdown("**Début de shift**")
+    if hasattr(st, "pills"):
+        _sel = st.pills("Début de shift", list(_opts), selection_mode="multi",
+                        label_visibility="collapsed", key="filtre_debut_shift")
+    else:  # anciennes versions de Streamlit
+        _sel = st.multiselect("Début de shift", list(_opts), label_visibility="collapsed",
+                              key="filtre_debut_shift")
+    _sel = _sel or []
+    st.caption("Aucune sélection = tous les débuts de shift." if not _sel
+               else f"{len(_sel)} horaire(s) sélectionné(s)")
+
     statuts = matrice["Statut"].unique().tolist()
     filtre = st.multiselect("Filtrer par statut", statuts, default=statuts)
     cols = ["Matricule_RH", "Login", "Nom", "Statut_planning", "Debut_prevu", "Fin_prevu",
             "Arrivee_reelle", "Depart_reel", "Retard_min", "Depart_anticipe_min", "Statut"]
     dfa = matrice[matrice["Statut"].isin(filtre)].copy()
+    if _sel:
+        _vals = [_opts[k] for k in _sel]
+        _mask = _hh.loc[dfa.index].isin([v for v in _vals if v is not None])
+        if None in _vals:
+            _mask |= _hh.loc[dfa.index].isna()
+        dfa = dfa[_mask]
     if agent_pct is not None:
         dfa = dfa.merge(agent_pct[["Login", "Taux_travail_pct", "Post-travail_pct", "Attente_pct", "Pause_pct"]],
                         on="Login", how="left").rename(columns={
