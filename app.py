@@ -150,8 +150,20 @@ if activities_df is None:
 if states is None:
     st.warning("« Agents report » non importé : la répartition des états (Attente, Post-travail, Pause…) est indisponible.")
 if hors_planning:
-    st.warning(f"⚠️ {len(hors_planning)} login(s) dans Vocalcom mais absents du planning du {jour_semaine} : "
-               + ", ".join(sorted(hors_planning)))
+    # Noms : "Agents report" (nom complet) en priorité, sinon nom tronqué de "Agents activities"
+    noms_hp = {}
+    if activities_df is not None and "Nom_tronque" in activities_df.columns:
+        noms_hp.update(activities_df.dropna(subset=["Nom_tronque"]).drop_duplicates("Login")
+                       .set_index("Login")["Nom_tronque"].to_dict())
+    if states is not None and "Nom" in states.columns:
+        noms_hp.update(states.dropna(subset=["Nom"]).drop_duplicates("Login")
+                       .set_index("Login")["Nom"].to_dict())
+    st.warning(f"⚠️ {len(hors_planning)} login(s) dans Vocalcom mais absents du planning du {jour_semaine}")
+    st.dataframe(
+        pd.DataFrame({"Login": sorted(hors_planning),
+                      "Nom": [noms_hp.get(lg, "—") for lg in sorted(hors_planning)]}),
+        hide_index=True, use_container_width=True,
+        height=min(38 * (len(hors_planning) + 1), 300))
 
 tab1, tab2, tab3, tab4 = st.tabs(["🏠 Dashboard", "📊 États par agent", "📋 Matrice", "🧑 Fiche individuelle"])
 
