@@ -59,12 +59,24 @@ def fmt_hm(minutes: float) -> str:
 # États (Agents report)
 # ---------------------------------------------------------------------------
 
-GROUPE_ATTENTE = "Attente"
+GROUPE_ATTENTE = "Attente"        # attente de RÉCEPTION (l'agent attend un appel)
+GROUPE_HOLD = "En attente"        # MISE EN ATTENTE du client, pendant l'appel
 GROUPE_TRAITEMENT = "Traitement"
 GROUPE_POST = "Post-travail"
 GROUPE_PAUSE = "Pause"
 GROUPE_AUTRE = "Autre"
 GROUPES = [GROUPE_TRAITEMENT, GROUPE_POST, GROUPE_ATTENTE, GROUPE_PAUSE, GROUPE_AUTRE]
+
+# Libellés affichés à l'écran (les clés internes ci-dessus ne changent pas,
+# elles servent de noms de colonnes : « Attente_pct », « En attente_pct »...)
+LIBELLE_GROUPE = {
+    GROUPE_ATTENTE: "Attente (réception)",
+    GROUPE_HOLD: "En attente (mise en attente)",
+}
+
+
+def libelle(groupe: str) -> str:
+    return LIBELLE_GROUPE.get(groupe, groupe)
 
 
 def _norm(s: str) -> str:
@@ -76,6 +88,10 @@ def _norm(s: str) -> str:
 def etat_groupe(categorie: str) -> str:
     """Rattache un libellé d'état Vocalcom à l'un des 5 groupes du dashboard."""
     n = _norm(categorie)
+    # « En attente » / « Mise en attente » (hold pendant l'appel) doit être testé
+    # AVANT « Attente » (réception) : ce sont deux choses différentes.
+    if n.startswith("en attente") or "mise en attente" in n or n.startswith("hold"):
+        return GROUPE_HOLD
     if n.startswith("attente"):
         return GROUPE_ATTENTE
     if n.startswith("traitement"):
@@ -87,14 +103,30 @@ def etat_groupe(categorie: str) -> str:
     return GROUPE_AUTRE
 
 
+def _groupe_ligne(categorie, parent, niveau) -> str:
+    own = etat_groupe(categorie)
+    if niveau == 2 and isinstance(parent, str):
+        # un sous-état « En attente » reste une mise en attente, même rangé
+        # sous « Traitement » ; les autres héritent du groupe de leur parent.
+        return GROUPE_HOLD if own == GROUPE_HOLD else etat_groupe(parent)
+    return own
+
+
 def prepare_states(agents_df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
     """Ajoute Groupe + Pct (part du temps total des états de premier niveau
-    de l'agent, donc le total fait 100 %)."""
+    de l'agent, donc le total fait 100 %).
+
+    Ajoute aussi `Hold_propre` : True pour un sous-état « En attente » rangé
+    sous un autre état (ex. Traitement) -> sert à ne pas le compter deux fois.
+    """
     if agents_df is None or agents_df.empty:
         return None
     df = agents_df.copy()
-    df["Groupe"] = [
-        etat_groupe(p if n == 2 and isinstance(p, str) else c)
+    df["Groupe"] = [_groupe_ligne(c, p, n)
+                    for c, p, n in zip(df["Categorie"], df["Parent"], df["Niveau"])]
+    df["Hold_propre"] = [
+        n == 2 and etat_groupe(c) == GROUPE_HOLD
+        and not (isinstance(p, str) and etat_groupe(p) == GROUPE_HOLD)
         for c, p, n in zip(df["Categorie"], df["Parent"], df["Niveau"])
     ]
     base = (
@@ -103,6 +135,32 @@ def prepare_states(agents_df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
     df = df.merge(base, on="Login", how="left")
     df["Pct"] = (df["Temps_total_min"] / df["Base_min"].where(df["Base_min"] > 0) * 100).fillna(0.0)
     return df
+
+
+def hold_est_etat_principal(states: Optional[pd.DataFrame]) -> bool:
+    """True si « En attente » est un état de premier niveau dans l'export."""
+    return states is not None and bool(((states["Niveau"] == 1) & (states["Groupe"] == GROUPE_HOLD)).any())
+
+
+def hold_detecte(states: Optional[pd.DataFrame]) -> bool:
+    """True si au moins un état « En attente » (n'importe quel niveau) existe."""
+    return states is not None and bool((states["Groupe"] == GROUPE_HOLD).any())
+
+
+def hold_rows(states: pd.DataFrame) -> pd.DataFrame:
+    """Lignes « mise en attente » sans double comptage (niveau 1, sinon sous-état)."""
+    return states[(states["Groupe"] == GROUPE_HOLD)
+                  & ((states["Niveau"] == 1) | (states["Hold_propre"]))]
+
+
+def groupes_affichables(states: Optional[pd.DataFrame], avec_hold_sous_etat: bool = False) -> list:
+    """Groupes à proposer dans les graphiques. « En attente » n'est ajouté
+    comme groupe séparé que s'il est un état principal (sinon il est déjà
+    dans Traitement et ferait dépasser 100 %), sauf pour les comparaisons."""
+    g = list(GROUPES)
+    if hold_est_etat_principal(states) or (avec_hold_sous_etat and hold_detecte(states)):
+        g.insert(g.index(GROUPE_ATTENTE) + 1, GROUPE_HOLD)
+    return g
 
 
 def team_state_totals(states: pd.DataFrame, niveau: int = 1) -> pd.DataFrame:
@@ -117,19 +175,33 @@ def team_state_totals(states: pd.DataFrame, niveau: int = 1) -> pd.DataFrame:
 
 
 def agent_group_pct(states: pd.DataFrame) -> pd.DataFrame:
-    """1 ligne / agent : minutes et % par groupe + taux de travail."""
+    """1 ligne / agent : minutes et % par groupe + taux de travail.
+
+    Les colonnes « Attente_* » = attente de réception ; « En attente_* » =
+    mise en attente pendant l'appel (toujours présentes, à 0 si absentes).
+    """
     top = states[states["Niveau"] == 1]
+    tous = GROUPES + [GROUPE_HOLD]
     mins = top.pivot_table(index=["Login", "Nom"], columns="Groupe",
                            values="Temps_total_min", aggfunc="sum", fill_value=0.0)
-    for g in GROUPES:
+    for g in tous:
         if g not in mins.columns:
             mins[g] = 0.0
-    mins = mins[GROUPES]
-    total = mins.sum(axis=1).replace(0, float("nan"))
-    pct = mins.div(total, axis=0).fillna(0.0) * 100
+    mins = mins[tous]
+    total = mins.sum(axis=1)
+    pct = mins.div(total.replace(0, float("nan")), axis=0).fillna(0.0) * 100
     out = mins.add_suffix("_min").join(pct.add_suffix("_pct")).reset_index()
-    out["Total_min"] = mins.sum(axis=1).values
+    out["Total_min"] = total.values
     out["Taux_travail_pct"] = out[f"{GROUPE_TRAITEMENT}_pct"] + out[f"{GROUPE_POST}_pct"]
+
+    if not hold_est_etat_principal(states):
+        # mise en attente = sous-état (déjà incluse dans Traitement) :
+        # % calculé sur la même base que les autres états.
+        hold = (hold_rows(states).groupby("Login")["Temps_total_min"].sum())
+        out[f"{GROUPE_HOLD}_min"] = out["Login"].map(hold).fillna(0.0)
+        out[f"{GROUPE_HOLD}_pct"] = (
+            out[f"{GROUPE_HOLD}_min"] / out["Total_min"].where(out["Total_min"] > 0) * 100
+        ).fillna(0.0)
     return out
 
 
@@ -281,6 +353,14 @@ def synthese_recadrage(row: pd.Series, date_jour: dt.date,
         top = agent_states[agent_states["Niveau"] == 1]
         parts = [f"{c} {p:.0f} %" for c, p in zip(top["Categorie"], top["Pct"])]
         lignes.append("• Répartition du temps : " + ", ".join(parts) + ".")
+        if "Groupe" in agent_states.columns and "Hold_propre" in agent_states.columns:
+            h = hold_rows(agent_states)
+            h_min = h["Temps_total_min"].sum()
+            if h_min > 0:
+                base = top["Temps_total_min"].sum()
+                h_pct = h_min / base * 100 if base > 0 else 0.0
+                lignes.append(f"• Mise en attente (pendant l'appel) : {h_pct:.1f} % du temps, "
+                              f"{fmt_hm(h_min)}, {int(h['Occurences'].sum())} fois.")
 
     lignes += ["", f"Statut global retenu : {row.get('Statut')}.",
                "Ces éléments sont issus des relevés Vocalcom et doivent être présentés "
