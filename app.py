@@ -193,16 +193,29 @@ with tab1:
             {"label": "Taux de travail (Traitement + Post-trav.)",
              "value": round(share(A.GROUPE_TRAITEMENT) + share(A.GROUPE_POST), 1), "icon": "💼",
              "color": "#0E7C86", "suffix": " %"},
-            {"label": "En attente (réception)", "value": round(share(A.GROUPE_ATTENTE), 1), "icon": "📞",
+            {"label": "Attente (réception d'appel)", "value": round(share(A.GROUPE_ATTENTE), 1), "icon": "📞",
              "color": "#E08E1D", "suffix": " %"},
-            {"label": "En pause", "value": round(share(A.GROUPE_PAUSE), 1), "icon": "☕",
-             "color": "#E5646A", "suffix": " %"},
         ]
+        if A.hold_detecte(states):
+            kpis.append({"label": "En attente (mise en attente en appel)", "value": round(share(A.GROUPE_HOLD), 1),
+                         "icon": "⏸️", "color": "#3B82C4", "suffix": " %"})
+        kpis.append({"label": "En pause", "value": round(share(A.GROUPE_PAUSE), 1), "icon": "☕",
+                     "color": "#E5646A", "suffix": " %"})
     T.render_kpi_row(kpis[:5], height=125)
     if len(kpis) > 5:
         T.render_kpi_row(kpis[5:], height=125)
         st.caption("Pourcentages calculés sur le temps cumulé de tous les agents présents dans « Agents report »"
                    + (" — période écoulée jusqu'à la fin de l'export (temps réel)." if export_temps_reel else "."))
+        T.definition_chips([
+            ("#E08E1D", "Attente", "l'agent attend de recevoir un appel (réception)"),
+            ("#3B82C4", "En attente", "mise en attente du client pendant l'appel"),
+        ])
+        if A.hold_detecte(states) and not A.hold_est_etat_principal(states):
+            st.caption("ℹ️ « En attente » est un sous-état de Traitement dans l'export : il est déjà compris "
+                       "dans le % Traitement / Taux de travail, il n'est pas ajouté en plus.")
+        elif not A.hold_detecte(states):
+            st.caption("ℹ️ Aucun état « En attente » (mise en attente) trouvé dans l'export — "
+                       "voir « Correspondance des états » en bas de cet onglet.")
 
     if states is not None:
         st.markdown("### Répartition du temps")
@@ -229,6 +242,16 @@ with tab1:
                          hide_index=True, use_container_width=True,
                          column_config={"% du temps": st.column_config.ProgressColumn(
                              "% du temps", min_value=0, max_value=100, format="%.1f %%")})
+
+    if states is not None:
+        with st.expander("🔎 Correspondance des états (libellé Vocalcom → groupe)"):
+            corr = (states.groupby(["Niveau", "Parent", "Categorie", "Groupe"], dropna=False, as_index=False)
+                    .agg(Temps_min=("Temps_total_min", "sum"), Occurences=("Occurences", "sum")))
+            corr["Groupe"] = corr["Groupe"].map(A.libelle)
+            corr["Parent"] = corr["Parent"].fillna("—")
+            st.dataframe(corr, hide_index=True, use_container_width=True)
+            st.caption("« Attente » = attente de réception · « En attente » = mise en attente pendant l'appel. "
+                       "Si un libellé est mal classé, adaptez `analysis.etat_groupe`.")
 
     st.markdown("### Ponctualité & présence")
     a1, a2 = st.columns(2)
@@ -264,9 +287,10 @@ with tab2:
 
         st.markdown("### Vue d'ensemble de l'équipe")
         g1, g2 = st.columns([3, 1])
-        groupes = g1.multiselect("Groupes affichés", A.GROUPES,
-                                 default=[g for g in A.GROUPES if g != A.GROUPE_AUTRE or agent_pct[f"{g}_min"].sum() > 0])
-        tri = g2.selectbox("Trier par", A.GROUPES[:4])
+        grp_opts = A.groupes_affichables(states)
+        groupes = g1.multiselect("Groupes affichés", grp_opts, format_func=A.libelle,
+                                 default=[g for g in grp_opts if g != A.GROUPE_AUTRE or agent_pct[f"{g}_min"].sum() > 0])
+        tri = g2.selectbox("Trier par", [g for g in grp_opts if g != A.GROUPE_AUTRE], format_func=A.libelle)
         if groupes:
             with st.container(border=True):
                 st.plotly_chart(C.stacked_agents(agent_pct, tri, groupes), use_container_width=True)
@@ -305,11 +329,15 @@ with tab3:
             _mask |= _hh.loc[dfa.index].isna()
         dfa = dfa[_mask]
     if agent_pct is not None:
-        dfa = dfa.merge(agent_pct[["Login", "Taux_travail_pct", "Post-travail_pct", "Attente_pct", "Pause_pct"]],
+        dfa = dfa.merge(agent_pct[["Login", "Taux_travail_pct", "Post-travail_pct", "Attente_pct",
+                                    "En attente_pct", "Pause_pct"]],
                         on="Login", how="left").rename(columns={
             "Taux_travail_pct": "Travail_%", "Post-travail_pct": "Post-travail_%",
-            "Attente_pct": "Attente_%", "Pause_pct": "Pause_%"})
-        cols += ["Travail_%", "Post-travail_%", "Attente_%", "Pause_%"]
+            "Attente_pct": "Attente_%", "En attente_pct": "En attente_%", "Pause_pct": "Pause_%"})
+        cols += ["Travail_%", "Post-travail_%", "Attente_%"]
+        if A.hold_detecte(states):
+            cols.append("En attente_%")
+        cols.append("Pause_%")
     num = ["Retard_min", "Depart_anticipe_min"] + [c for c in cols if c.endswith("_%")]
     with st.container(border=True):
         st.dataframe(T.style_matrice(dfa[cols], status_col="Statut", numeric_cols=num),
@@ -369,6 +397,11 @@ with tab4:
         post_moy = post_min * 60 / post_occ if post_occ else 0
         team_post = agent_pct[f"{A.GROUPE_POST}_pct"].mean()
         gp = {g: top1[top1["Groupe"] == g]["Pct"].sum() for g in A.GROUPES}
+        hold_ag = A.hold_rows(ag_states)
+        hold_min = hold_ag["Temps_total_min"].sum()
+        hold_occ = int(hold_ag["Occurences"].sum())
+        hold_pct = hold_min / top1["Temps_total_min"].sum() * 100 if top1["Temps_total_min"].sum() > 0 else 0.0
+        hold_moy = hold_min * 60 / hold_occ if hold_occ else 0
         T.render_kpi_row([
             {"label": "Post-travail (% du temps)", "value": round(post_pct, 1), "suffix": " %", "icon": "📝", "color": "#7B61FF"},
             {"label": "Post-travail — durée", "value": round(post_min), "suffix": " min", "icon": "⏲️", "color": "#7B61FF"},
@@ -377,9 +410,17 @@ with tab4:
         ], height=125)
         T.render_kpi_row([
             {"label": "Taux de travail", "value": round(gp[A.GROUPE_TRAITEMENT] + gp[A.GROUPE_POST], 1), "suffix": " %", "icon": "💼", "color": "#0E7C86"},
-            {"label": "Attente", "value": round(gp[A.GROUPE_ATTENTE], 1), "suffix": " %", "icon": "📞", "color": "#E08E1D"},
+            {"label": "Attente (réception d'appel)", "value": round(gp[A.GROUPE_ATTENTE], 1), "suffix": " %", "icon": "📞", "color": "#E08E1D"},
             {"label": "Pause", "value": round(gp[A.GROUPE_PAUSE], 1), "suffix": " %", "icon": "☕", "color": "#E5646A"},
         ], height=125)
+        if A.hold_detecte(states):
+            st.markdown("**⏸️ En attente — mise en attente pendant l'appel**")
+            T.render_kpi_row([
+                {"label": "En attente (% du temps)", "value": round(hold_pct, 1), "suffix": " %", "icon": "⏸️", "color": "#3B82C4"},
+                {"label": "En attente — durée", "value": round(hold_min), "suffix": " min", "icon": "⏲️", "color": "#3B82C4"},
+                {"label": "Nombre de mises en attente", "value": hold_occ, "icon": "🔢", "color": "#3B82C4"},
+                {"label": "Durée moy. / mise en attente (s)", "value": round(hold_moy), "suffix": " s", "icon": "🔁", "color": "#3B82C4"},
+            ], height=125)
 
         d1, d2 = st.columns(2)
         with d1:
@@ -394,7 +435,8 @@ with tab4:
                     st.plotly_chart(C.donut_etats(tt, "Son temps par état"), use_container_width=True)
         with d2:
             with st.container(border=True):
-                st.plotly_chart(C.agent_vs_team(agent_pct, login), use_container_width=True)
+                st.plotly_chart(C.agent_vs_team(agent_pct, login, A.groupes_affichables(states, avec_hold_sous_etat=True)),
+                                use_container_width=True)
 
         with st.expander("📋 Tableau détaillé de ses états", expanded=True):
             t = ag_states[["Categorie", "Parent", "Occurences", "Temps_total_min", "Pct"]].rename(columns={
