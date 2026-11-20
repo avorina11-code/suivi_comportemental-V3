@@ -165,7 +165,7 @@ if hors_planning:
         hide_index=True, use_container_width=True,
         height=min(38 * (len(hors_planning) + 1), 300))
 
-tab1, tab2, tab3, tab4 = st.tabs(["🏠 Dashboard", "📊 États par agent", "📋 Matrice", "🧑 Fiche individuelle"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["🏠 Dashboard", "📊 États par agent", "📋 Matrice", "🧑 Fiche individuelle", "✨ Vue animée"])
 
 # ==========================================================================
 # 1. DASHBOARD
@@ -409,3 +409,17 @@ with tab4:
     st.text_area("Synthèse", texte, height=240, label_visibility="collapsed")
     st.download_button("📥 Télécharger la synthèse (.txt)", texte.encode("utf-8"),
                        f"synthese_{row['Login']}_{report_date.isoformat()}.txt", "text/plain")
+
+# ==========================================================================
+# 5. VUE ANIMÉE (front HTML / CSS / JS)
+# ==========================================================================
+with tab5:
+    import streamlit.components.v1 as components
+    import front_data as FD
+    _data = FD.build(planning_df, activities_df, agents_df, report_date, seuil_retard,
+                     export_temps_reel, heure_extraction, demo=st.session_state.is_demo)
+    _html = FD.render_html(_data)
+    if hasattr(st, "iframe"):  # Streamlit récent : st.components.v1.html est déprécié
+        st.iframe(_html, height=1150)
+    else:
+        components.html(_html, height=1150, scrolling=True)
