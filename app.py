@@ -18,14 +18,40 @@ import analysis as A
 import charts as C
 import demo as D
 import parsers as P
+import persistence as S
 import theme as T
 
 st.set_page_config(page_title="Adhérence Planning CSA", page_icon="📞", layout="wide")
 T.inject_global_style()
 
 for k, v in {"planning_df": None, "activities_df": None, "agents_df": None,
-             "detections": [], "export_date": None, "is_demo": False}.items():
+             "detections": [], "export_date": None, "is_demo": False,
+             "source_json": None}.items():
     st.session_state.setdefault(k, v)
+
+# Préférences : valeurs par défaut, complétées par le fichier local « sauvegardes/preferences.json »
+if not st.session_state.get("_prefs_init"):
+    for _k, _v in S.prefs_to_state(S.load_local_prefs()).items():
+        st.session_state.setdefault(_k, _v)
+    st.session_state["_prefs_init"] = True
+
+# Import JSON demandé au run précédent : appliqué ici, avant la création des widgets.
+_pending = st.session_state.pop("_pending_import", None)
+if _pending:
+    _parsed, _use_prefs, _use_data = _pending
+    _msgs = []
+    if _use_prefs and _parsed["preferences"]:
+        st.session_state.update(S.prefs_to_state({**S.state_to_prefs(st.session_state),
+                                                  **_parsed["preferences"]}))
+        _msgs.append("préférences appliquées")
+    if _use_data and _parsed["planning"] is not None:
+        st.session_state.update(planning_df=_parsed["planning"], activities_df=_parsed["activites"],
+                               agents_df=_parsed["agents"], export_date=_parsed["date"],
+                               is_demo=_parsed["demo"], source_json=_parsed["exporte_le"] or "JSON",
+                               detections=[("Sauvegarde JSON", "💾 Journée restaurée")])
+        _msgs.append(f"journée du {_parsed['date'].strftime('%d/%m/%Y')} chargée" if _parsed["date"]
+                     else "journée chargée")
+    st.session_state["_flash"] = "✅ Import réussi : " + " · ".join(_msgs) if _msgs else None
 
 # ==========================================================================
 # SIDEBAR
@@ -40,11 +66,27 @@ vocalcom_files = st.sidebar.file_uploader("Exports Vocalcom — .xls / .xlsx", t
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("⚙️ Paramètres")
-export_temps_reel = st.sidebar.checkbox("Export en cours de journée (Temps Réel)", value=False,
+export_temps_reel = st.sidebar.checkbox("Export en cours de journée (Temps Réel)", key="pref_export_temps_reel",
     help="Les pourcentages couvrent la période jusqu'à la fin de l'export. Désactive l'alerte de "
          "départ anticipé pour les agents dont la fin de shift est après l'heure d'extraction.")
-heure_extraction = st.sidebar.time_input("Heure d'extraction", value=dt.time(13, 0)) if export_temps_reel else None
-seuil_retard = st.sidebar.number_input("Seuil de retard toléré (min)", 0, 60, 5, 1)
+_h = st.sidebar.time_input("Heure d'extraction", key="pref_heure_extraction", disabled=not export_temps_reel)
+heure_extraction = _h if export_temps_reel else None
+seuil_retard = st.sidebar.number_input("Seuil de retard toléré (min)", min_value=0, max_value=60, step=1,
+                                       key="pref_seuil_retard")
+with st.sidebar.expander("🎯 Critères de suivi (post-appel / mise en attente)"):
+    st.selectbox("Méthode", list(S.MODES_SUIVI), format_func=S.MODES_SUIVI.get, key="pref_mode_suivi",
+                 help="« Relatif à l'équipe » repère les agents nettement au-dessus de la moyenne du jour ; "
+                      "« Seuils fixes » utilise les % ci-dessous.")
+    _equipe = st.session_state.get("pref_mode_suivi") == "equipe"
+    st.number_input("N écarts-types au-dessus de la moyenne", min_value=0.0, max_value=5.0, step=0.5,
+                    key="pref_k_suivi", disabled=not _equipe)
+    st.number_input("Seuil fixe Post-travail (% du temps)", min_value=0.0, max_value=100.0, step=1.0,
+                    key="pref_seuil_post", disabled=_equipe)
+    st.number_input("Seuil fixe mise en attente (% du temps)", min_value=0.0, max_value=100.0, step=1.0,
+                    key="pref_seuil_hold", disabled=_equipe)
+    st.number_input("Temps observé minimum (min)", min_value=0, max_value=600, step=5,
+                    key="pref_min_total_min",
+                    help="Les agents observés moins longtemps ne sont pas évalués (évite les faux positifs).")
 date_manuelle = st.sidebar.date_input("Date de l'export (si non détectée)", value=dt.date.today(), format="DD/MM/YYYY")
 
 st.sidebar.markdown("---")
@@ -56,6 +98,7 @@ demo_btn = c2.button("🧪 Démo", use_container_width=True, help="Charge des do
 def _process_uploads():
     det = []
     st.session_state.is_demo = False
+    st.session_state.source_json = None
     if planning_file is not None:
         try:
             st.session_state.planning_df = P.load_planning(planning_file)
@@ -93,7 +136,8 @@ if demo_btn:
     jour = dt.date.today() - dt.timedelta(days=1)
     pl, ac, ag = D.build_demo(jour)
     st.session_state.update(planning_df=pl, activities_df=ac, agents_df=ag, export_date=jour,
-                            is_demo=True, detections=[("Données fictives", "🧪 Mode démo")])
+                            is_demo=True, source_json=None,
+                            detections=[("Données fictives", "🧪 Mode démo")])
 
 if st.session_state.detections:
     with st.sidebar.expander("🔍 Détection automatique", expanded=True):
@@ -102,10 +146,93 @@ if st.session_state.detections:
             st.caption(label)
 
 # ==========================================================================
+# SAUVEGARDE / IMPORT JSON
+# ==========================================================================
+def _apercu_import(parsed: dict, key: str) -> None:
+    """Aperçu d'une sauvegarde lue + bouton d'import (appliqué au run suivant)."""
+    quand = (parsed["exporte_le"] or "")[:16].replace("T", " ")
+    if parsed["type"] == "journee":
+        nb = len(parsed["planning"]) if parsed["planning"] is not None else 0
+        jour = parsed["date"].strftime("%d/%m/%Y") if parsed["date"] else "date inconnue"
+        st.info(f"**Journée du {jour}** · {nb} agent(s) au planning"
+                + (" · 🧪 données fictives" if parsed["demo"] else "")
+                + (f" · exportée le {quand}" if quand else ""))
+    else:
+        st.info("**Préférences seules**" + (f" · exportées le {quand}" if quand else ""))
+    use_data = parsed["type"] == "journee" and st.checkbox(
+        "Charger les données de la journée", value=True, key=f"imp_data_{key}")
+    use_prefs = bool(parsed["preferences"]) and st.checkbox(
+        "Appliquer les préférences (seuils, critères de suivi…)", value=True, key=f"imp_prefs_{key}")
+    if st.button("📥 Importer", type="primary", key=f"imp_btn_{key}", disabled=not (use_data or use_prefs)):
+        st.session_state["_pending_import"] = (parsed, use_prefs, use_data)
+        st.rerun()
+
+
+def render_sauvegarde(ctx: dict | None) -> None:
+    """ctx = None : seulement l'import (aucune donnée chargée pour l'instant)."""
+    prefs = S.state_to_prefs(st.session_state)
+
+    st.markdown("#### 📥 Importer une sauvegarde")
+    up = st.file_uploader("Fichier JSON (journée ou préférences)", type=["json"], key="json_import_file")
+    if up is not None:
+        try:
+            _apercu_import(S.parse_payload(up.getvalue()), "fichier")
+        except ValueError as exc:
+            st.error(str(exc))
+
+    if ctx is not None:
+        st.markdown("#### 📤 Exporter")
+        e1, e2 = st.columns(2)
+        with e1:
+            payload = S.build_journee(ctx["report_date"], ctx["planning_df"], ctx["activities_df"],
+                                      ctx["agents_df"], prefs, ctx["resume"], ctx["is_demo"])
+            st.download_button("⬇️ Journée complète (données + préférences + résumé)", data=S.dumps(payload),
+                               file_name=f"journee_{ctx['report_date'].isoformat()}.json",
+                               mime="application/json", use_container_width=True, type="primary")
+            st.caption("Permet de rouvrir la journée plus tard sans réimporter les fichiers Excel.")
+        with e2:
+            st.download_button("⬇️ Préférences seules", data=S.dumps(S.build_preferences(prefs)),
+                               file_name="preferences.json", mime="application/json", use_container_width=True)
+            st.caption("Seuil de retard, mode temps réel, critères de suivi.")
+
+    st.markdown("#### 💽 Sauvegardes sur ce disque")
+    if ctx is not None:
+        d1, d2 = st.columns(2)
+        if d1.button("💾 Enregistrer cette journée", use_container_width=True):
+            try:
+                chemin = S.save_local_journee(payload)
+                st.success(f"Journée enregistrée : `{chemin.name}`")
+            except OSError as exc:
+                st.error(f"Écriture impossible : {exc}")
+        if d2.button("⭐ Enregistrer mes préférences", use_container_width=True,
+                     help="Rechargées automatiquement au prochain lancement."):
+            try:
+                S.save_local_prefs(S.build_preferences(prefs))
+                st.success("Préférences enregistrées (rechargées au prochain lancement).")
+            except OSError as exc:
+                st.error(f"Écriture impossible : {exc}")
+    saved = S.list_local_journees()
+    if saved:
+        choix = st.selectbox("Journées enregistrées", saved, key="local_choice")
+        try:
+            _apercu_import(S.parse_payload(S.read_local_journee(choix)), "disque")
+        except (ValueError, OSError) as exc:
+            st.error(str(exc))
+    else:
+        st.caption("Aucune journée enregistrée sur ce disque pour l'instant.")
+    st.caption("ℹ️ Sur un hébergement type Streamlit Cloud, le disque est temporaire : utilisez plutôt "
+               "les exports JSON ci-dessus pour conserver vos données.")
+
+
+# ==========================================================================
 # GARDE-FOUS
 # ==========================================================================
 T.hero_banner("📞 Dashboard Adhérence & Suivi Comportemental — CSA",
               "Ponctualité (Agents activities by dates) · Répartition des états (Agents report)")
+
+if st.session_state.get("_flash"):
+    st.success(st.session_state.pop("_flash"))
+st.session_state.pop("_flash", None)
 
 planning_df = st.session_state.planning_df
 activities_df = st.session_state.activities_df
@@ -121,6 +248,8 @@ if planning_df is None or (activities_df is None and agents_df is None):
 | **Agents activities by dates** | Arrivée / départ réels → retards, départs anticipés, absences (jointure par Login) |
 | **Agents report** | États : Attente, Traitement, Post-travail, Pause (+ sous-catégories) → dashboard et fiches |
 """)
+    with st.expander("💾 Ou rouvrir une sauvegarde JSON (journée / préférences)"):
+        render_sauvegarde(None)
     st.stop()
 
 # ==========================================================================
@@ -165,7 +294,21 @@ if hors_planning:
         hide_index=True, use_container_width=True,
         height=min(38 * (len(hors_planning) + 1), 300))
 
-tab1, tab2, tab3, tab4 = st.tabs(["🏠 Dashboard", "📊 États par agent", "📋 Matrice", "🧑 Fiche individuelle"])
+prefs = S.state_to_prefs(st.session_state)
+resume = A.resume_jour(matrice)
+if agent_pct is not None:
+    suivi, suivi_meta = A.suivi_post_hold(
+        states, agent_pct, mode=prefs["mode_suivi"], k=prefs["k_suivi"], seuil_post=prefs["seuil_post"],
+        seuil_hold=prefs["seuil_hold"], min_total_min=prefs["min_total_min"])
+else:
+    suivi = suivi_meta = None
+
+if st.session_state.source_json:
+    st.caption(f"💾 Données restaurées depuis une sauvegarde JSON ({str(st.session_state.source_json)[:16].replace('T', ' ')}).")
+
+tab1, tab_res, tab2, tab3, tab4, tab_save = st.tabs(
+    ["🏠 Dashboard", "📝 Résumé du jour", "📊 États par agent", "📋 Matrice", "🧑 Fiche individuelle",
+     "💾 Sauvegarde"])
 
 # ==========================================================================
 # 1. DASHBOARD
@@ -451,3 +594,110 @@ with tab4:
     st.text_area("Synthèse", texte, height=240, label_visibility="collapsed")
     st.download_button("📥 Télécharger la synthèse (.txt)", texte.encode("utf-8"),
                        f"synthese_{row['Login']}_{report_date.isoformat()}.txt", "text/plain")
+
+# ==========================================================================
+# RÉSUMÉ DU JOUR
+# ==========================================================================
+with tab_res:
+    _r_df, _a_df = resume["retards"], resume["absents"]
+    _n_post = int(suivi["Suivi_post"].sum()) if suivi is not None else 0
+    _n_hold = int(suivi["Suivi_hold"].sum()) if suivi is not None else 0
+    st.markdown(f"### 📝 Résumé du {report_date.strftime('%d/%m/%Y')}")
+    T.render_kpi_row([
+        {"label": "En retard", "value": len(_r_df), "icon": "⏱️", "color": T.WARNING, "alert": len(_r_df) > 0},
+        {"label": "Absences non justifiées", "value": len(_a_df), "icon": "🚫", "color": T.DANGER,
+         "alert": len(_a_df) > 0},
+        {"label": "À suivre — post-appel", "value": _n_post, "icon": "📝", "color": "#7B61FF"},
+        {"label": "À suivre — mise en attente", "value": _n_hold, "icon": "⏸️", "color": "#3B82C4"},
+    ], height=115)
+
+    _c1, _c2 = st.columns(2)
+    with _c1:
+        with st.container(border=True):
+            st.markdown(f"#### ⏱️ En retard ({len(_r_df)})")
+            if _r_df.empty:
+                st.success("Aucun retard au-delà du seuil toléré.")
+            else:
+                st.dataframe(_r_df, hide_index=True, use_container_width=True,
+                             height=min(38 * (len(_r_df) + 1) + 3, 380))
+            st.caption(f"Retard compté au-delà de {prefs['seuil_retard']} min de tolérance.")
+    with _c2:
+        with st.container(border=True):
+            st.markdown(f"#### 🚫 Absents ({len(_a_df)})")
+            if _a_df.empty:
+                st.success("Aucune absence non justifiée.")
+            else:
+                st.dataframe(_a_df, hide_index=True, use_container_width=True,
+                             height=min(38 * (len(_a_df) + 1) + 3, 380))
+            if resume["pas_commence"]:
+                st.caption(f"{resume['pas_commence']} agent(s) dont le shift n'a pas encore commencé "
+                           "(non comptés comme absents).")
+
+    st.markdown("### 🎯 Qui mérite un suivi aujourd'hui ?")
+    if suivi is None:
+        st.info("Importez « Agents report » pour repérer les agents à suivre sur le post-appel "
+                "et la mise en attente.")
+    else:
+        _m = suivi_meta
+        if _m["mode_demande"] == "equipe" and _m["mode"] == "fixe":
+            st.caption("Moins de 3 agents évaluables : les seuils fixes sont utilisés à la place du repérage "
+                       "relatif à l'équipe.")
+        if _m["agents_ecartes"]:
+            st.caption(f"{_m['agents_ecartes']} agent(s) écarté(s) : temps observé inférieur à "
+                       f"{prefs['min_total_min']} min.")
+        _p1, _p2 = st.columns(2)
+        with _p1:
+            with st.container(border=True):
+                _p = suivi[suivi["Suivi_post"]].sort_values("Post_pct", ascending=False)
+                st.markdown(f"#### 📝 Post-appel — Post-travail ({len(_p)})")
+                st.caption(f"Seuil : ≥ {_m['seuil_post']:.1f} % du temps · moyenne équipe {_m['moy_post']:.1f} %"
+                           + (f" (moyenne + {_m['k']:g} écart-type)" if _m["mode"] == "equipe" else " (seuil fixe)"))
+                if _p.empty:
+                    st.success("Personne à suivre sur le post-appel.")
+                else:
+                    st.dataframe(
+                        pd.DataFrame({"Nom": _p["Nom"].fillna("—").values, "Login": _p["Login"].values,
+                                      "% du temps": _p["Post_pct"].round(1).values,
+                                      "Durée moy. (s)": _p["Post_moy_s"].values}),
+                        hide_index=True, use_container_width=True,
+                        height=min(38 * (len(_p) + 1) + 3, 380),
+                        column_config={"% du temps": st.column_config.NumberColumn(format="%.1f %%")})
+        with _p2:
+            with st.container(border=True):
+                st.markdown(f"#### ⏸️ Mise en attente — En attente ({_n_hold})")
+                if not _m["hold_dispo"]:
+                    st.info("Aucun état « En attente » (mise en attente) trouvé dans l'export — voir "
+                            "« Correspondance des états » dans l'onglet Dashboard.")
+                else:
+                    _h = suivi[suivi["Suivi_hold"]].sort_values("Hold_pct", ascending=False)
+                    st.caption(f"Seuil : ≥ {_m['seuil_hold']:.1f} % du temps · moyenne équipe {_m['moy_hold']:.1f} %"
+                               + (f" (moyenne + {_m['k']:g} écart-type)" if _m["mode"] == "equipe"
+                                  else " (seuil fixe)"))
+                    if _h.empty:
+                        st.success("Personne à suivre sur la mise en attente.")
+                    else:
+                        st.dataframe(
+                            pd.DataFrame({"Nom": _h["Nom"].fillna("—").values, "Login": _h["Login"].values,
+                                          "% du temps": _h["Hold_pct"].round(1).values,
+                                          "Nb": _h["Hold_nb"].astype(int).values,
+                                          "Durée moy. (s)": _h["Hold_moy_s"].values}),
+                            hide_index=True, use_container_width=True,
+                            height=min(38 * (len(_h) + 1) + 3, 380),
+                            column_config={"% du temps": st.column_config.NumberColumn(format="%.1f %%")})
+        st.caption("Critères modifiables dans la barre latérale (« 🎯 Critères de suivi ») et sauvegardables "
+                   "dans l'onglet « 💾 Sauvegarde ».")
+
+    with st.expander("📋 Message à copier (WhatsApp / mail)"):
+        st.code(A.resume_texte(report_date, resume, suivi, suivi_meta), language=None)
+
+# ==========================================================================
+# SAUVEGARDE
+# ==========================================================================
+with tab_save:
+    st.markdown("### 💾 Sauvegarde & préférences")
+    st.caption("Exportez la journée (données + préférences + résumé) en JSON, ou rouvrez-en une plus tard.")
+    render_sauvegarde({
+        "report_date": report_date, "planning_df": planning_df, "activities_df": activities_df,
+        "agents_df": agents_df, "is_demo": st.session_state.is_demo,
+        "resume": A.resume_json(report_date, resume, suivi, suivi_meta),
+    })
