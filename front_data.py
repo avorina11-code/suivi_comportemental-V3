@@ -58,6 +58,21 @@ def build(planning, acts, ags, d, seuil=5, rt=False, heure=None, demo=False):
                {"l": "En attente", "v": round(sh(A.GROUPE_ATTENTE), 1), "s": " %", "d": 1, "c": COUL["amber"]},
                {"l": "En pause", "v": round(sh(A.GROUPE_PAUSE), 1), "s": " %", "d": 1, "c": COUL["pau"]}]
     pmap = {r["Login"]: {g: round(float(r[f"{g}_pct"]), 1) for g in A.GROUPES} for _, r in pct.iterrows()} if pct is not None else {}
+    etats = None
+    if states is not None:
+        par = states[states["Niveau"] == 2].drop_duplicates("Categorie").set_index("Categorie")["Parent"].to_dict()
+        etats = [{"c": r["Categorie"], "g": r["Groupe"], "n": n, "p": par.get(r["Categorie"]) if n == 2 else None,
+                  "min": round(float(r["Temps_min"])), "occ": int(r["Occurences"]), "pct": round(float(r["Pct"]), 2)}
+                 for n in (1, 2) for _, r in A.team_state_totals(states, n).iterrows() if r["Temps_min"] > 0]
+
+    def ets(s):
+        if s is None or s.empty:
+            return []
+        return [{"c": r["Categorie"], "g": r["Groupe"], "n": int(r["Niveau"]),
+                 "p": r["Parent"] if isinstance(r["Parent"], str) else None,
+                 "min": round(float(r["Temps_total_min"])), "pct": round(float(r["Pct"]), 2)}
+                for _, r in s.iterrows() if r["Temps_total_min"] > 0]
+
     agents = []
     for _, r in m.iterrows():
         lg = r["Login"]
@@ -68,10 +83,10 @@ def build(planning, acts, ags, d, seuil=5, rt=False, heure=None, demo=False):
             "debut": hm(r["Debut_prevu"]), "fin": hm(r["Fin_prevu"]), "arr": hm(r["Arrivee_reelle"]), "dep": hm(r["Depart_reel"]),
             "ecart": None if e is None or e != e else float(e), "retard": n1(r["Retard_min"]), "depa": n1(r["Depart_anticipe_min"]),
             "ign": bool(r["Depart_anticipe_ignore"]), "duree": round(A.safe_num(r["Duree_travail_min"])),
-            "pct": pmap.get(lg), "syn": A.synthese_recadrage(r, d, ags_s)})
+            "pct": pmap.get(lg), "et": ets(ags_s), "syn": A.synthese_recadrage(r, d, ags_s)})
     return {"date": d.strftime("%d/%m/%Y"), "jour": jour, "demo": demo, "seuil": seuil,
             "temps_reel": hm(heure) if rt and heure else None, "warns": warns, "kpis": kp,
-            "groupes": groupes, "moy": moy, "agents": agents}
+            "groupes": groupes, "moy": moy, "etats": etats, "agents": agents}
 
 
 
