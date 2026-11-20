@@ -259,6 +259,69 @@ def inject_global_style():
             content: ''; width: 7px; height: 7px; border-radius: 50%;
             background: currentColor; flex-shrink: 0;
         }}
+
+        /* ---------------------------------------------------------- */
+        /* Cartes : fond blanc + ombre douce au survol                 */
+        /* ---------------------------------------------------------- */
+        div[data-testid="stVerticalBlockBorderWrapper"] {{
+            background: {PAPER_RAISED};
+            transition: box-shadow .2s ease, border-color .2s ease;
+        }}
+        div[data-testid="stVerticalBlockBorderWrapper"]:hover {{
+            box-shadow: 0 6px 18px rgba(16,24,43,.07);
+            border-color: #CBD3E0 !important;
+        }}
+
+        /* Pastilles de définition (Attente vs En attente) */
+        .csa-chips {{ display: flex; flex-wrap: wrap; gap: 10px; margin: 2px 0 16px; }}
+        .csa-chip {{
+            display: inline-flex; align-items: center; gap: 9px;
+            padding: 8px 15px; border-radius: 999px; font-size: 13px;
+            background: {PAPER_RAISED}; border: 1px solid {BORDER}; color: {TEXT_DARK};
+            transition: transform .18s ease, box-shadow .18s ease;
+        }}
+        .csa-chip:hover {{ transform: translateY(-2px); box-shadow: 0 5px 14px rgba(16,24,43,.10); }}
+        .csa-chip i {{
+            width: 10px; height: 10px; border-radius: 50%;
+            background: var(--dot); flex-shrink: 0;
+        }}
+        .csa-chip b {{ font-weight: 700; }}
+        .csa-chip span {{ color: {TEXT_MUTED}; }}
+
+        /* ---------------------------------------------------------- */
+        /* Animations (coupées si l'utilisateur préfère moins de mouvement) */
+        /* ---------------------------------------------------------- */
+        @keyframes csa-fade-up {{
+            from {{ opacity: 0; transform: translateY(12px); }}
+            to   {{ opacity: 1; transform: none; }}
+        }}
+        @keyframes csa-pulse-ring {{
+            0%   {{ box-shadow: 0 0 0 0 rgba(224,142,29,.55); }}
+            70%  {{ box-shadow: 0 0 0 9px rgba(224,142,29,0); }}
+            100% {{ box-shadow: 0 0 0 0 rgba(224,142,29,0); }}
+        }}
+        @media (prefers-reduced-motion: no-preference) {{
+            .csa-hero {{ animation: csa-fade-up .5s ease-out both; }}
+            .csa-hero h1::before {{ animation: csa-pulse-ring 2.2s ease-out infinite; }}
+            .csa-chip {{ animation: csa-fade-up .5s ease-out both; }}
+            .csa-chip:nth-child(2) {{ animation-delay: .08s; }}
+            .csa-chip:nth-child(3) {{ animation-delay: .16s; }}
+            [data-baseweb="tab-panel"] {{ animation: csa-fade-up .45s ease-out both; }}
+            div[data-testid="stVerticalBlockBorderWrapper"] {{ animation: csa-fade-up .5s ease-out both; }}
+            .stPlotlyChart {{ animation: csa-fade-up .6s ease-out .1s both; }}
+            div[data-testid="stDataFrame"] {{ animation: csa-fade-up .5s ease-out .1s both; }}
+            [data-testid="stAlert"] {{ animation: csa-fade-up .4s ease-out both; }}
+            .stTabs [data-baseweb="tab"] {{ transition: color .15s ease; }}
+            div.stButton > button, div.stDownloadButton > button {{
+                transition: transform .12s ease, box-shadow .12s ease, filter .12s ease;
+            }}
+            div.stButton > button:hover, div.stDownloadButton > button:hover {{
+                transform: translateY(-1px); box-shadow: 0 4px 12px rgba(16,24,43,.18);
+            }}
+            div.stButton > button:active, div.stDownloadButton > button:active {{
+                transform: translateY(0) scale(.98);
+            }}
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -277,6 +340,15 @@ def hero_banner(title: str, subtitle: str = ""):
     )
 
 
+def definition_chips(items) -> None:
+    """Pastilles explicatives. items = [(couleur, titre, description), ...]"""
+    chips = "".join(
+        f'<div class="csa-chip" style="--dot:{c};"><i></i><b>{t}</b><span>{d}</span></div>'
+        for c, t, d in items
+    )
+    st.markdown(f'<div class="csa-chips">{chips}</div>', unsafe_allow_html=True)
+
+
 def status_badge(status_text: str) -> str:
     """ Retourne le HTML d'un badge coloré pour un statut donné (à insérer via st.markdown(..., unsafe_allow_html=True)). """
     bg, fg = STATUS_COLORS.get(status_text, DEFAULT_STATUS_COLOR)
@@ -291,21 +363,35 @@ _KPI_CSS = f"""
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@600;700&family=Inter:wght@500;600&display=swap');
   * {{ box-sizing: border-box; }}
-  body {{ margin: 0; font-family: 'Inter', -apple-system, sans-serif; }}
+  body {{ margin: 0; padding: 4px 0 2px; font-family: 'Inter', -apple-system, sans-serif; }}
   .kpi-row {{ display: flex; gap: 12px; flex-wrap: wrap; }}
   .kpi-card {{
       flex: 1; min-width: 155px; background: {PAPER_RAISED}; border-radius: 8px;
       padding: 14px 16px 14px 16px; border: 1px solid {BORDER};
       border-left: 3px solid var(--rail-color, {PRIMARY});
       position: relative;
+      transition: transform .2s ease, box-shadow .2s ease;
   }}
+  .kpi-card:hover {{ transform: translateY(-3px); box-shadow: 0 8px 20px rgba(16,24,43,.10); }}
   .kpi-card.alert {{ animation: csa-signal 1.9s ease-in-out infinite; }}
   @keyframes csa-signal {{
       0%, 100% {{ border-left-color: var(--rail-color, {DANGER}); }}
       50%      {{ border-left-color: {PAPER_RAISED}; }}
   }}
+  @keyframes kpi-in {{
+      from {{ opacity: 0; transform: translateY(14px); }}
+      to   {{ opacity: 1; transform: none; }}
+  }}
+  @media (prefers-reduced-motion: no-preference) {{
+      .kpi-card {{ opacity: 0; animation: kpi-in .55s cubic-bezier(.22,1,.36,1) forwards;
+                   animation-delay: calc(var(--i, 0) * 70ms); }}
+      .kpi-card.alert {{ animation: kpi-in .55s cubic-bezier(.22,1,.36,1) forwards,
+                                    csa-signal 1.9s ease-in-out calc(var(--i, 0) * 70ms + 550ms) infinite; }}
+      .kpi-card:hover .kpi-icon {{ transform: scale(1.25) rotate(-8deg); opacity: .9; }}
+  }}
   .kpi-icon {{
       position: absolute; top: 12px; right: 14px; font-size: 15px; opacity: .55;
+      transition: transform .25s ease, opacity .25s ease;
   }}
   .kpi-value {{
       font-family: 'Space Grotesk', sans-serif;
@@ -316,27 +402,44 @@ _KPI_CSS = f"""
       font-size: 12px; color: {TEXT_MUTED}; font-weight: 500;
       margin-top: 5px;
   }}
+  .kpi-bar {{
+      height: 4px; border-radius: 99px; background: #EEF1F6;
+      margin-top: 9px; overflow: hidden;
+  }}
+  .kpi-bar > i {{
+      display: block; height: 100%; width: 0; border-radius: 99px;
+      background: var(--rail-color, {PRIMARY});
+      transition: width 1.1s cubic-bezier(.22,1,.36,1);
+  }}
 </style>
 """
 
 _KPI_JS = """
 <script>
-  const vals = document.querySelectorAll('.kpi-value');
-  vals.forEach(function(el) {
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  document.querySelectorAll('.kpi-card').forEach(function(card, idx) {
+    const el = card.querySelector('.kpi-value');
+    const bar = card.querySelector('.kpi-bar > i');
     const target = parseFloat(el.getAttribute('data-target')) || 0;
     const suffix = el.getAttribute('data-suffix') || '';
     const isInt = el.getAttribute('data-int') === '1';
-    const duration = 700;
-    let start = null;
-    function step(ts) {
-      if (!start) start = ts;
-      const progress = Math.min((ts - start) / duration, 1);
-      const eased = 1 - Math.pow(1 - progress, 3);
-      const current = target * eased;
-      el.textContent = (isInt ? Math.round(current) : current.toFixed(1)) + suffix;
-      if (progress < 1) requestAnimationFrame(step);
-    }
-    requestAnimationFrame(step);
+    const fmt = function(v) { return (isInt ? Math.round(v) : v.toFixed(1)) + suffix; };
+    const setBar = function() { if (bar) bar.style.width = Math.max(0, Math.min(100, target)) + '%'; };
+    if (reduce) { el.textContent = fmt(target); setBar(); return; }
+    const delay = idx * 70;
+    const duration = 900;
+    setTimeout(function() {
+      setBar();
+      let start = null;
+      function step(ts) {
+        if (!start) start = ts;
+        const progress = Math.min((ts - start) / duration, 1);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        el.textContent = fmt(target * eased);
+        if (progress < 1) requestAnimationFrame(step);
+      }
+      requestAnimationFrame(step);
+    }, delay);
   });
 </script>
 """
@@ -344,26 +447,29 @@ _KPI_JS = """
 
 def render_kpi_row(items, height: int = 130):
     """
-    Affiche une rangée de cartes KPI avec compteur animé en JS.
+    Affiche une rangée de cartes KPI animées (entrée en cascade, compteur,
+    barre de progression pour les valeurs en %, légère élévation au survol).
 
     items : liste de dicts
         {"label": str, "value": float|int, "icon": str,
          "color": str (couleur du rail d'accent, optionnel),
-         "suffix": str (optionnel, ex " min"),
-         "alert": bool (optionnel, active un léger signal de pulsation
-                  sur le rail de couleur — pas de halo/ombre agressif)}
+         "suffix": str (optionnel, ex " min" ou " %"),
+         "alert": bool (optionnel, léger signal de pulsation du rail)}
+    Une barre de progression est ajoutée automatiquement quand le suffixe est « % ».
     """
     cards = []
-    for it in items:
+    for i, it in enumerate(items):
         color = it.get("color", PRIMARY)
         suffix = it.get("suffix", "")
         is_int = isinstance(it["value"], int) or float(it["value"]).is_integer()
         alert_cls = " alert" if it.get("alert") else ""
+        bar = '<div class="kpi-bar"><i></i></div>' if suffix.strip() == "%" else ""
         cards.append(f"""
-        <div class="kpi-card{alert_cls}" style="--rail-color:{color};">
+        <div class="kpi-card{alert_cls}" style="--rail-color:{color}; --i:{i};">
           <div class="kpi-icon">{it.get('icon', '📌')}</div>
           <div class="kpi-value" data-target="{it['value']}" data-suffix="{suffix}" data-int="{1 if is_int else 0}">0{suffix}</div>
           <div class="kpi-label">{it['label']}</div>
+          {bar}
         </div>
         """)
     html = _KPI_CSS + f'<div class="kpi-row">{"".join(cards)}</div>' + _KPI_JS
