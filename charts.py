@@ -16,6 +16,7 @@ COULEURS_GROUPES = {
     A.GROUPE_TRAITEMENT: "#0E7C86",
     A.GROUPE_POST: "#7B61FF",
     A.GROUPE_ATTENTE: "#E08E1D",
+    A.GROUPE_HOLD: "#3B82C4",
     A.GROUPE_PAUSE: "#E5646A",
     A.GROUPE_AUTRE: "#8A97AC",
 }
@@ -30,7 +31,8 @@ COULEURS_STATUT = {
 
 def _base(fig, height=360, title=None):
     fig.update_layout(template=T.PLOTLY_TEMPLATE_NAME, height=height,
-                      title=title if title else fig.layout.title.text)
+                      title=title if title else fig.layout.title.text,
+                      transition=dict(duration=600, easing="cubic-in-out"))
     return fig
 
 
@@ -78,10 +80,10 @@ def stacked_agents(agent_pct: pd.DataFrame, sort_by: str, groupes: list[str]) ->
     d = agent_pct.sort_values(f"{sort_by}_pct", ascending=True)
     fig = go.Figure()
     for g in groupes:
-        fig.add_bar(y=d["Nom"].fillna(d["Login"]), x=d[f"{g}_pct"], name=g, orientation="h",
+        fig.add_bar(y=d["Nom"].fillna(d["Login"]), x=d[f"{g}_pct"], name=A.libelle(g), orientation="h",
                     marker_color=COULEURS_GROUPES[g],
                     customdata=d[f"{g}_min"],
-                    hovertemplate="<b>%{y}</b><br>" + g + " : %{x:.1f} % (%{customdata:.0f} min)<extra></extra>")
+                    hovertemplate="<b>%{y}</b><br>" + A.libelle(g) + " : %{x:.1f} % (%{customdata:.0f} min)<extra></extra>")
     fig.update_layout(barmode="stack", legend=dict(orientation="h", y=1.04),
                       xaxis=dict(title="% du temps", range=[0, 100]))
     return _base(fig, max(380, 22 * len(d) + 120), "Répartition du temps par agent")
@@ -147,15 +149,17 @@ def gantt_agent(row: pd.Series) -> go.Figure | None:
     return _base(fig, 200, "Planning vs réel")
 
 
-def agent_vs_team(agent_pct: pd.DataFrame, login: str) -> go.Figure:
+def agent_vs_team(agent_pct: pd.DataFrame, login: str, groupes=None) -> go.Figure:
     a = agent_pct[agent_pct["Login"] == login].iloc[0]
-    gs = [g for g in A.GROUPES if g != A.GROUPE_AUTRE or a[f"{g}_pct"] > 0]
+    groupes = groupes or A.GROUPES
+    gs = [g for g in groupes if g != A.GROUPE_AUTRE or a[f"{g}_pct"] > 0]
+    labels = [A.libelle(g) for g in gs]
     moy = [agent_pct[f"{g}_pct"].mean() for g in gs]
     fig = go.Figure()
-    fig.add_bar(x=gs, y=[a[f"{g}_pct"] for g in gs], name="Agent",
+    fig.add_bar(x=labels, y=[a[f"{g}_pct"] for g in gs], name="Agent",
                 marker_color=[COULEURS_GROUPES[g] for g in gs],
                 text=[f"{a[f'{g}_pct']:.1f} %" for g in gs], textposition="outside")
-    fig.add_bar(x=gs, y=moy, name="Moyenne équipe", marker_color="#C9D1DE",
+    fig.add_bar(x=labels, y=moy, name="Moyenne équipe", marker_color="#C9D1DE",
                 text=[f"{v:.1f} %" for v in moy], textposition="outside")
     fig.update_layout(barmode="group", yaxis_title="% du temps", legend=dict(orientation="h", y=1.1))
     return _base(fig, 340, "Agent vs moyenne équipe")
