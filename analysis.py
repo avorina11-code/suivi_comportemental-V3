@@ -366,3 +366,139 @@ def synthese_recadrage(row: pd.Series, date_jour: dt.date,
                "Ces éléments sont issus des relevés Vocalcom et doivent être présentés "
                "à l'agent à titre d'échange contradictoire avant toute décision RH."]
     return "\n".join(lignes)
+
+
+# ---------------------------------------------------------------------------
+# Résumé du jour : retards, absences, agents à suivre (post-appel / mise en attente)
+# ---------------------------------------------------------------------------
+
+def _hhmm(t) -> str:
+    return t.strftime("%H:%M") if hasattr(t, "strftime") else "—"
+
+
+def resume_jour(matrice: pd.DataFrame) -> dict:
+    """Retards (au-delà du seuil déjà appliqué dans la matrice) et absences
+    non justifiées du jour. `pas_commence` = agents dont le shift n'a pas
+    encore démarré (non comptés comme absents)."""
+    ret = matrice[matrice["Retard_min"].fillna(0) > 0].sort_values("Retard_min", ascending=False)
+    retards = pd.DataFrame({
+        "Nom": ret["Nom"].fillna("—").values, "Login": ret["Login"].values,
+        "Début prévu": [_hhmm(t) for t in ret["Debut_prevu"]],
+        "Arrivée": [_hhmm(t) for t in ret["Arrivee_reelle"]],
+        "Retard (min)": ret["Retard_min"].round(0).astype(int).values,
+    })
+    ab = matrice[matrice["Statut"] == STATUT_ABSENT]
+    absents = pd.DataFrame({
+        "Nom": ab["Nom"].fillna("—").values, "Login": ab["Login"].values,
+        "Début prévu": [_hhmm(t) for t in ab["Debut_prevu"]],
+        "Fin prévue": [_hhmm(t) for t in ab["Fin_prevu"]],
+    })
+    return {"retards": retards, "absents": absents,
+            "pas_commence": int((matrice["Statut"] == STATUT_PAS_COMMENCE).sum())}
+
+
+PLANCHER_SUIVI_PCT = 2.0   # en mode « équipe », jamais de suivi sous ce % du temps
+
+
+def suivi_post_hold(states: pd.DataFrame, agent_pct: pd.DataFrame, *, mode: str = "equipe",
+                    k: float = 1.0, seuil_post: float = 15.0, seuil_hold: float = 8.0,
+                    min_total_min: float = 30.0):
+    """Agents qui méritent un suivi aujourd'hui sur le post-appel (Post-travail)
+    et la mise en attente (En attente).
+
+    mode « equipe » : seuil = moyenne équipe + k × écart-type (repli sur les
+    seuils fixes si moins de 3 agents évaluables). mode « fixe » : seuils en %.
+    Les agents observés moins de `min_total_min` minutes ne sont pas évalués.
+
+    Retourne (DataFrame par agent, méta : seuils réellement utilisés, moyennes).
+    """
+    ap = agent_pct[agent_pct["Total_min"] >= min_total_min].copy()
+
+    post = (states[(states["Niveau"] == 1) & (states["Groupe"] == GROUPE_POST)]
+            .groupby("Login").agg(Post_min=("Temps_total_min", "sum"), Post_nb=("Occurences", "sum")))
+    ap = ap.merge(post, on="Login", how="left")
+    hold_ok = hold_detecte(states)
+    if hold_ok:
+        hold = hold_rows(states).groupby("Login").agg(Hold_min=("Temps_total_min", "sum"),
+                                                       Hold_nb=("Occurences", "sum"))
+        ap = ap.merge(hold, on="Login", how="left")
+    else:
+        ap["Hold_min"] = 0.0
+        ap["Hold_nb"] = 0
+    for c in ("Post_min", "Post_nb", "Hold_min", "Hold_nb"):
+        ap[c] = ap[c].fillna(0)
+
+    ap["Post_pct"] = ap[f"{GROUPE_POST}_pct"]
+    ap["Hold_pct"] = ap[f"{GROUPE_HOLD}_pct"] if hold_ok else 0.0
+    ap["Post_moy_s"] = (ap["Post_min"] * 60 / ap["Post_nb"].where(ap["Post_nb"] > 0)).round(0)
+    ap["Hold_moy_s"] = (ap["Hold_min"] * 60 / ap["Hold_nb"].where(ap["Hold_nb"] > 0)).round(0)
+
+    equipe = mode == "equipe" and len(ap) >= 3
+
+    def _seuil(serie: pd.Series, fixe: float) -> float:
+        if equipe:
+            return max(float(serie.mean() + k * serie.std(ddof=0)), PLANCHER_SUIVI_PCT)
+        return float(fixe)
+
+    s_post, s_hold = _seuil(ap["Post_pct"], seuil_post), _seuil(ap["Hold_pct"], seuil_hold)
+    ap["Suivi_post"] = (ap["Post_pct"] >= s_post) & (ap["Post_pct"] > 0)
+    ap["Suivi_hold"] = hold_ok & (ap["Hold_pct"] >= s_hold) & (ap["Hold_pct"] > 0)
+    meta = {
+        "mode": "equipe" if equipe else "fixe",
+        "mode_demande": mode, "k": k, "hold_dispo": bool(hold_ok),
+        "seuil_post": s_post, "seuil_hold": s_hold,
+        "moy_post": float(ap["Post_pct"].mean()) if len(ap) else 0.0,
+        "moy_hold": float(ap["Hold_pct"].mean()) if len(ap) else 0.0,
+        "agents_evalues": int(len(ap)), "agents_ecartes": int(len(agent_pct) - len(ap)),
+    }
+    cols = ["Login", "Nom", "Total_min", "Post_pct", "Post_moy_s", "Suivi_post",
+            "Hold_pct", "Hold_moy_s", "Hold_nb", "Suivi_hold"]
+    return ap[cols].reset_index(drop=True), meta
+
+
+def resume_json(date_jour: Optional[dt.date], res: dict,
+                suivi: Optional[pd.DataFrame], meta: Optional[dict]) -> dict:
+    """Version sérialisable du résumé (inscrite dans la sauvegarde JSON, à titre informatif)."""
+    out = {
+        "date": date_jour.isoformat() if date_jour else None,
+        "retards": res["retards"].to_dict("records"),
+        "absences": res["absents"].to_dict("records"),
+        "suivi_post_appel": [], "suivi_mise_en_attente": [], "criteres_suivi": None,
+    }
+    if suivi is not None and meta is not None:
+        out["suivi_post_appel"] = [
+            {"Nom": r.Nom, "Login": r.Login, "pct": round(float(r.Post_pct), 1)}
+            for r in suivi[suivi["Suivi_post"]].sort_values("Post_pct", ascending=False).itertuples()]
+        out["suivi_mise_en_attente"] = [
+            {"Nom": r.Nom, "Login": r.Login, "pct": round(float(r.Hold_pct), 1)}
+            for r in suivi[suivi["Suivi_hold"]].sort_values("Hold_pct", ascending=False).itertuples()]
+        out["criteres_suivi"] = {k: (round(v, 2) if isinstance(v, float) else v) for k, v in meta.items()}
+    return out
+
+
+def resume_texte(date_jour: Optional[dt.date], res: dict,
+                 suivi: Optional[pd.DataFrame], meta: Optional[dict]) -> str:
+    """Message prêt à copier (WhatsApp / mail)."""
+    d = date_jour.strftime("%d/%m/%Y") if date_jour else "—"
+    L = [f"📋 Résumé du {d}", ""]
+    r, a = res["retards"], res["absents"]
+    L.append(f"⏱️ Retards : {len(r)}")
+    L += [f"  • {x.Nom} ({x.Login}) : +{x._5} min (prévu {x._3}, arrivé {x.Arrivée})"
+          for x in r.rename(columns={"Début prévu": "_3", "Retard (min)": "_5"}).itertuples()]
+    L += ["", f"🚫 Absences non justifiées : {len(a)}"]
+    L += [f"  • {x.Nom} ({x.Login}) : prévu {x._3}–{x._4}"
+          for x in a.rename(columns={"Début prévu": "_3", "Fin prévue": "_4"}).itertuples()]
+    L += ["", "🎯 À suivre aujourd'hui"]
+    if suivi is None or meta is None:
+        L.append("  (Agents report non disponible)")
+        return "\n".join(L)
+    p = suivi[suivi["Suivi_post"]].sort_values("Post_pct", ascending=False)
+    L.append(f"  Post-appel ({len(p)}) — seuil ≥ {meta['seuil_post']:.1f} % :")
+    L += [f"    • {x.Nom} ({x.Login}) : {x.Post_pct:.1f} %" for x in p.itertuples()] or ["    • personne"]
+    if meta["hold_dispo"]:
+        h = suivi[suivi["Suivi_hold"]].sort_values("Hold_pct", ascending=False)
+        L.append(f"  Mise en attente ({len(h)}) — seuil ≥ {meta['seuil_hold']:.1f} % :")
+        L += [f"    • {x.Nom} ({x.Login}) : {x.Hold_pct:.1f} %" for x in h.itertuples()] or ["    • personne"]
+    else:
+        L.append("  Mise en attente : non détectée dans l'export")
+    return "\n".join(L)
