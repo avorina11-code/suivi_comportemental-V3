@@ -45,8 +45,10 @@ def build_demo(date: dt.date, n: int = 24, seed: int = 7):
                            "Occurences": occ, "Temps_total_min": round(t, 2), "Pourcent_temps": None})
         add("Attente", None, 1, att, rnd.randint(20, 60))
         add("Traitement", None, 1, trt, rnd.randint(20, 60))
-        add("Appel entrant", "Traitement", 2, trt * 0.8, rnd.randint(15, 50))
+        hold = trt * rnd.uniform(0.04, 0.14)   # mise en attente pendant l'appel
+        add("Appel entrant", "Traitement", 2, trt * 0.8 - hold, rnd.randint(15, 50))
         add("Appel sortant", "Traitement", 2, trt * 0.2, rnd.randint(2, 15))
+        add("En attente", "Traitement", 2, hold, rnd.randint(8, 35))
         add("Post-travail", None, 1, post, rnd.randint(15, 50))
         add("Pause", None, 1, pause, rnd.randint(2, 6))
         add("Pause déjeuner", "Pause", 2, dej, 1)
